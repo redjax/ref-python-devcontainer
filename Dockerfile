@@ -36,6 +36,8 @@ ENV CONTAINER_HOME=/home/${CONTAINER_USER}
 ## Add CONTAINER_USER's bin to PATH
 ENV PATH="${PATH}:${CONTAINER_HOME}/.local/bin"
 
+## Enable package manager caching. If you run into issues with build layers,
+#  disable these env vars by commenting them out
 ENV PDM_HTTP_CACHE=${CONTAINER_HOME}/.cache/pdm \
     PIP_CACHE_DIR=${CONTAINER_HOME}/.cache/pip \
     PYPI_CACHE_DIR=${CONTAINER_HOME}/.cache/pypi
@@ -59,22 +61,65 @@ ARG USER_GID
 
 RUN apt-get update -y
 ## Install system packages
-RUN apt-get install -y \
+RUN apt-get install --no-install-recommends -y \
     git \
     openssh-server \
     ## For docker-in-docker
     uidmap
 
 ## Uncomment next 3 RUN commands to add sudo support for the container user
-RUN apt-get install -y sudo \
+RUN apt-get install --no-install-recommends -y sudo \
     && echo "$CONTAINER_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${CONTAINER_USER}
 RUN chmod 0440 /etc/sudoers.d/${CONTAINER_USER}
 RUN echo "${CONTAINER_USER}:x:${USER_UID}:$USER_GID:${CONTAINER_USER}:/home/${CONTAINER_USER}:/bin/bash" >> /etc/passwd
 
+FROM build AS pyenv-base
+
+RUN mkdir -pv ${CONTAINER_HOME}/.pyenv \
+    && chown -R ${CONTAINER_USER}:${CONTAINER_USER} ${CONTAINER_HOME}/.pyenv
+
+ENV PYENV_ROOT=/pyenv
+
+## Import args from base layer
+ARG CONTAINER_USER
+ARG USER_UID
+ARG USER_GID
+
+## Install Pyenv
+#  https://bnikolic.co.uk/blog/python/2023/03/23/pyenvdocker.html
+
+RUN apt-get install --no-install-recommends -y \
+    make \
+    build-essential \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    wget \
+    curl \
+    llvm \
+    libncurses5-dev \
+    libncursesw5-dev \
+    xz-utils \
+    tk-dev \
+    libffi-dev \
+    liblzma-dev \
+    git
+
+USER ${CONTAINER_USER}
+
+WORKDIR ${CONTAINER_HOME}
+RUN git clone https://github.com/pyenv/pyenv.git .pyenv
+
+## Add Pyenv to PATH
+ENV PYENV_ROOT="${CONTAINER_HOME}/.pyenv"
+ENV PATH="${PYENV_ROOT}/shims:${PYENV_ROOT}/bin:${PATH}"
+
 ## -- END ROOT USER SESSION --
 
 ## Install/build Python dependencies
-FROM build AS python-build
+FROM pyenv-base AS python-build
 
 ARG CONTAINER_USER
 ARG USER_UID
@@ -83,18 +128,25 @@ ARG USER_GID
 ## Set this layer to run as the container user
 USER ${CONTAINER_USER}
 
+## Install Python versions with Pyenv
+RUN pyenv install 3.11.4 \
+    && pyenv install 3.12.0
+
+## Set global pyenv version
+RUN pyenv global 3.11.4 3.12.0
+
 ## Install pipx
 #  Use a mounted .cache/pip dir so subsequent builds are faster.
 #  To build without the cache, rebuild the Docker container itself with --no-cache
-RUN python3 -m pip install --user pipx \
-    && python3 -m pipx ensurepath
+RUN python -m pip install --user pipx \
+    && python -m pipx ensurepath
 
 ## Install dev dependencies
 RUN python3 -m pipx install black \
-    && python3 -m pipx install ruff \
-    && python3 -m pipx install pdm \
-    && python3 -m pipx install tox \
-    && python3 -m pipx install nox
+    && python -m pipx install ruff \
+    && python -m pipx install pdm \
+    && python -m pipx install tox \
+    && python -m pipx install nox
 
 ## Build layer for VSCode
 FROM python-build AS devcontainer
@@ -102,6 +154,11 @@ FROM python-build AS devcontainer
 ARG CONTAINER_USER
 ARG USER_UID
 ARG USER_GID
+
+## Unset Python package manager caches for running in VSCode devcontainer
+ENV PDM_HTTP_CACHE= \
+    PIP_CACHE_DIR= \
+    PYPI_CACHE_DIR=
 
 ## Set this layer to run as the container user
 USER ${CONTAINER_USER}
